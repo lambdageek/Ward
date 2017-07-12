@@ -10,9 +10,9 @@ module Types where
 
 import Control.Concurrent.Chan (Chan, writeChan)
 import Control.Monad.IO.Class (MonadIO(..))
+import Data.Foldable (fold)
 import Data.HashSet (HashSet)
 import Data.Hashable (Hashable(..))
-import Data.List (intersperse)
 import Data.Map (Map)
 import Data.Monoid ((<>), Endo(..))
 import Data.Text (Text)
@@ -25,6 +25,7 @@ import Language.C.Data.Position (posFile, posRow)
 import Language.C.Syntax.AST -- *
 import qualified Language.C.Parser as CParser
 import qualified Data.Map as Map
+import qualified Data.Sequence as Sequence
 import qualified Data.Text as Text
 import qualified Text.Parsec.Error as ParsecErr
 
@@ -193,18 +194,20 @@ data CallTree a
   deriving (Eq, Foldable, Functor, Traversable)
 
 newtype CallSequence a
-  = CallSequence [CallTree a]
+  = CallSequence (Sequence.Seq (CallTree a))
   deriving (Eq, Monoid, Foldable, Functor, Traversable)
 
 nullCallSequence :: CallSequence a -> Bool
-nullCallSequence (CallSequence ts) = null ts
+nullCallSequence (CallSequence ts) = Sequence.null ts
 
 singletonCallSequence :: CallTree a -> CallSequence a
-singletonCallSequence t = CallSequence [t]
+singletonCallSequence = CallSequence . Sequence.singleton
 
 viewlCallSequence :: CallSequence a -> Maybe (CallTree a, CallSequence a)
-viewlCallSequence (CallSequence []) = Nothing
-viewlCallSequence (CallSequence (t:ts)) = Just (t, CallSequence ts)
+viewlCallSequence (CallSequence ts) =
+  case Sequence.viewl ts of
+    (t Sequence.:< ts') -> Just (t, CallSequence ts')
+    Sequence.EmptyL -> Nothing
 
 -- | Traverse the @CallTree a@ elements of a @CallSequence b@
 --
@@ -226,7 +229,7 @@ instance (Show a) => Show (CallTree a) where
 instance (Show a) => Show (CallSequence a) where
   showsPrec p = \ case
     CallSequence ts -> showParen (p > sequencePrec)
-      $ appEndo $ mconcat $ intersperse (Endo $ showString " ; ") (map (Endo . showsPrec sequencePrec) ts)
+      $ appEndo $ fold $ Sequence.intersperse (Endo $ showString " ; ") $ fmap (Endo . showsPrec sequencePrec) ts
     where
       sequencePrec = 1
 
@@ -235,7 +238,7 @@ callTreeBreadth :: CallSequence a -> Int
 callTreeBreadth (CallSequence ts) = length ts
 
 callTreeIndex :: Int -> CallSequence a -> CallTree a
-callTreeIndex index (CallSequence ts) = ts !! index
+callTreeIndex index (CallSequence ts) = Sequence.index ts index
 
 --------------------------------------------------------------------------------
 -- Input

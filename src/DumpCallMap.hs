@@ -13,10 +13,11 @@ import Control.Monad.IO.Class (MonadIO(..))
 
 import qualified Data.ByteString.Builder as B
 import Data.Foldable
-import qualified Data.Map as Map
 import Data.List (intersperse)
+import qualified Data.Map as Map
 import Data.Monoid (Monoid(..), (<>))
 import qualified Data.Text.Encoding as DTE
+import qualified Data.Sequence as Sequence
 import System.IO (Handle)
 
 import Language.C.Data.Ident (Ident, identToString)
@@ -118,7 +119,7 @@ encodeCallTree enc = goSeqForest
     -- as long as t is a Nop or Sequence output as is, otherwise output a new
     -- form.
     goSeqForest :: CallSequence a -> B.Builder
-    goSeqForest (CallSequence ts) = mconcat $ intersperse newline (map goTree ts)
+    goSeqForest (CallSequence ts) = fold $ Sequence.intersperse newline (fmap goTree ts)
     goSeq :: CallSequence a -> B.Builder
     goSeq = form "seq" True . goSeqForest
     goTree :: CallTree a -> B.Builder
