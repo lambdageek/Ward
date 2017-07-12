@@ -92,7 +92,7 @@ parser = between ws eof callmapForm
 callmapForm :: Parser CallMap
 callmapForm = theForm "callmap" (Map.fromList <$> many functionForm)
 
-type CallMapItem = (NodeInfo, CallTree Ident, PermissionActionSet)
+type CallMapItem = (NodeInfo, CallSequence Ident, PermissionActionSet)
 
 functionForm :: Parser (Ident, CallMapItem)
 functionForm =
@@ -127,31 +127,24 @@ permissionActionForm =
     permissionName :: Spanning Sidentifier -> PermissionName
     permissionName = PermissionName . sidentText . extractSpan
 
-calltreeForm :: Parser (CallTree Ident)
+calltreeForm :: Parser (CallSequence Ident)
 calltreeForm = theForm "calltree" seqForest
 
-seqForest :: Parser (CallTree Ident)
-seqForest = joinForest <$> many subcallForm
-  where
-    joinForest :: [CallTree a] -> CallTree a
-    joinForest = foldr combineSeq Nop
-    combineSeq :: CallTree a -> CallTree a -> CallTree a
-    combineSeq Nop a = a
-    combineSeq a Nop = a
-    combineSeq a b = Sequence a b
+seqForest :: Parser (CallSequence Ident)
+seqForest = CallSequence <$> many subcallForm
 
 subcallForm :: Parser (CallTree Ident)
 subcallForm =
-  aForm (seqSubForm <|> choiceSubForm <|> callSubForm) <?> "call, choice or seq subform"
+  aForm (choiceSubForm <|> callSubForm) <?> "call, choice or seq subform"
   where
-    seqSubForm :: Parser (CallTree Ident)
-    seqSubForm = theIdentifier "seq" *> seqForest
+    seqForm :: Parser (CallSequence Ident)
+    seqForm = theForm "seq" seqForest
 
     callSubForm :: Parser (CallTree Ident)
     callSubForm = Call <$ theIdentifier "call" <*> identForm
 
     choiceSubForm :: Parser (CallTree Ident)
-    choiceSubForm = Choice <$ theIdentifier "choice" <*> subcallForm <*> subcallForm
+    choiceSubForm = Choice <$ theIdentifier "choice" <*> seqForm <*> seqForm
 
 identForm :: Parser Ident
 identForm =

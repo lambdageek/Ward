@@ -3,6 +3,7 @@ module DumpCallMap (encodeCallMap, hPutCallMap) where
 
 import Types (CallMap
              , CallTree(..)
+             , CallSequence(..)
              , PermissionAction(..)
              , PermissionActionSet
              , PermissionName(..)
@@ -24,7 +25,7 @@ import Language.C.Data.Name (Name)
 import qualified Language.C.Data.Node as Node
 import qualified Language.C.Data.Position as Pos
 
-type CallMapItem = (NodeInfo, CallTree Ident, PermissionActionSet)
+type CallMapItem = (NodeInfo, CallSequence Ident, PermissionActionSet)
 
 -- | Encode the given callmap as a "Data.ByteString
 encodeCallMap :: CallMap -> B.Builder
@@ -111,21 +112,19 @@ encodeSourcePos p =
       ]
   in form "source" False $ mconcat $ intersperse space body
 
-encodeCallTree :: forall a . (a -> B.Builder) -> CallTree a -> B.Builder
-encodeCallTree enc = goSeq
+encodeCallTree :: forall a . (a -> B.Builder) -> CallSequence a -> B.Builder
+encodeCallTree enc = goSeqForest
   where
     -- as long as t is a Nop or Sequence output as is, otherwise output a new
     -- form.
-    goSeq :: CallTree a -> B.Builder
-    goSeq t = case t of
-      Nop -> mempty
-      Sequence t1 t2 -> go t1 <> newline <> goSeq t2
-      _ -> go t
-    go :: CallTree a -> B.Builder
-    go t = case t of
-      Choice t1 t2 -> form "choice" True (go t1 <> newline <> go t2)
+    goSeqForest :: CallSequence a -> B.Builder
+    goSeqForest (CallSequence ts) = mconcat $ intersperse newline (map goTree ts)
+    goSeq :: CallSequence a -> B.Builder
+    goSeq = form "seq" True . goSeqForest
+    goTree :: CallTree a -> B.Builder
+    goTree t = case t of
+      Choice t1 t2 -> form "choice" True (goSeq t1 <> newline <> goSeq t2)
       Call c -> form "call" False (enc c)
-      _ -> form "seq" True (goSeq t)
 
 encodePerms :: PermissionActionSet -> B.Builder
 encodePerms =
