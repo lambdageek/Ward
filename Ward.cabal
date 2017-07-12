@@ -26,7 +26,7 @@ executable ward
   build-depends:       base
                      , array
                      , bytestring
-                     , containers
+                     , containers >= 0.5.8
                      , deepseq
                      , filepath
                      , hashable
@@ -58,7 +58,7 @@ test-suite test
                      , HUnit
                      , array
                      , bytestring
-                     , containers
+                     , containers >= 0.5.8
                      , deepseq
                      , hashable
                      , hspec

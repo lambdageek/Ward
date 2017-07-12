@@ -17,6 +17,7 @@ import Text.Parsec.Text.Lazy
 import qualified Data.HashSet as HashSet
 import qualified Data.Map as Map
 import qualified Data.ByteString.Lazy  as BSL
+import qualified Data.Sequence as Sequence
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as TextL
 import qualified Data.Text.Lazy.Encoding as TextL
@@ -131,7 +132,7 @@ calltreeForm :: Parser (CallSequence Ident)
 calltreeForm = theForm "calltree" seqForest
 
 seqForest :: Parser (CallSequence Ident)
-seqForest = CallSequence <$> many subcallForm
+seqForest = (CallSequence . Sequence.fromList) <$> many subcallForm
 
 subcallForm :: Parser (CallTree Ident)
 subcallForm =
