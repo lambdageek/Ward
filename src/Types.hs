@@ -12,8 +12,9 @@ import Control.Concurrent.Chan (Chan, writeChan)
 import Control.Monad.IO.Class (MonadIO(..))
 import Data.HashSet (HashSet)
 import Data.Hashable (Hashable(..))
+import Data.List (intersperse)
 import Data.Map (Map)
-import Data.Monoid ((<>))
+import Data.Monoid ((<>), Endo(..))
 import Data.Text (Text)
 import Data.These
 import GHC.Exts (IsString(..))
@@ -156,7 +157,7 @@ type NameMap = Map Ident (NodeInfo, Maybe CFunDef, PermissionActionSet)
 -- | Built from a 'NameMap', a 'CallMap' contains a compact 'CallTree' for each
 -- function instead of the whole definition.
 --
-type CallMap = Map Ident (NodeInfo, CallTree Ident, PermissionActionSet)
+type CallMap = Map Ident (NodeInfo, CallSequence Ident, PermissionActionSet)
 
 -- | A 'CallTree' describes the calls that a function makes in its definition. A
 -- 'Call' leaf node refers to a call site; a 'Nop' leaf refers to a statement
@@ -186,46 +187,55 @@ type CallMap = Map Ident (NodeInfo, CallTree Ident, PermissionActionSet)
 -- merging their effects on the context.
 --
 data CallTree a
-  = Sequence !(CallTree a) !(CallTree a)
-  | Choice !(CallTree a) !(CallTree a)
+  = Choice !(CallSequence a) !(CallSequence a)
   | Call !a
-  | Nop
+  -- | Abort  - the Monoid identity for 'CallTree' with respect to the 'Choice' operator
   deriving (Eq, Foldable, Functor, Traversable)
 
-simplifyCallTree :: CallTree a -> CallTree a
-simplifyCallTree (Sequence a b) = case (simplifyCallTree a, simplifyCallTree b) of
-  (a', Nop) -> a'
-  (Nop, b') -> b'
-  (a', b') -> Sequence a' b'
-simplifyCallTree (Choice a b) = case (simplifyCallTree a, simplifyCallTree b) of
-  (a', Nop) -> a'
-  (Nop, b') -> b'
-  (a', b') -> Choice a' b'
-simplifyCallTree leaf = leaf
+newtype CallSequence a
+  = CallSequence [CallTree a]
+  deriving (Eq, Monoid, Foldable, Functor, Traversable)
+
+nullCallSequence :: CallSequence a -> Bool
+nullCallSequence (CallSequence ts) = null ts
+
+singletonCallSequence :: CallTree a -> CallSequence a
+singletonCallSequence t = CallSequence [t]
+
+viewlCallSequence :: CallSequence a -> Maybe (CallTree a, CallSequence a)
+viewlCallSequence (CallSequence []) = Nothing
+viewlCallSequence (CallSequence (t:ts)) = Just (t, CallSequence ts)
+
+-- | Traverse the @CallTree a@ elements of a @CallSequence b@
+--
+-- This is a @Traversal@ in the sense of the lens library (although we do not depend on lens)
+-- @@@
+--   callTreesOfCallSequence :: Traversal (CallSequence a) (CallSequence b) (CallTree a) (CallTree b)
+-- @@@
+callTreesOfCallSequence :: Applicative f => (CallTree a -> f (CallTree b)) -> CallSequence a -> f (CallSequence b)
+callTreesOfCallSequence f (CallSequence ts) = CallSequence <$> traverse f ts
 
 instance (Show a) => Show (CallTree a) where
   showsPrec p = \ case
-    Sequence a b -> showParen (p > sequencePrec)
-      $ showsPrec sequencePrec a . showString " ; " . showsPrec sequencePrec b
     Choice a b -> showParen (p > choicePrec)
       $ showsPrec choicePrec a . showString " | " . showsPrec choicePrec b
     Call ident -> shows ident
-    Nop -> id
     where
-      sequencePrec = 1
       choicePrec = 0
 
-callTreeBreadth :: CallTree a -> Int
-callTreeBreadth (Sequence a b) = callTreeBreadth a + callTreeBreadth b
-callTreeBreadth Choice{} = 1  -- Not sure if this is correct.
-callTreeBreadth Call{} = 1
-callTreeBreadth Nop = 0
+instance (Show a) => Show (CallSequence a) where
+  showsPrec p = \ case
+    CallSequence ts -> showParen (p > sequencePrec)
+      $ appEndo $ mconcat $ intersperse (Endo $ showString " ; ") (map (Endo . showsPrec sequencePrec) ts)
+    where
+      sequencePrec = 1
 
-callTreeIndex :: Int -> CallTree a -> CallTree a
-callTreeIndex index tree = breadthFirst tree !! index
-  where
-    breadthFirst (Sequence a b) = breadthFirst a <> breadthFirst b
-    breadthFirst t = [t]
+
+callTreeBreadth :: CallSequence a -> Int
+callTreeBreadth (CallSequence ts) = length ts
+
+callTreeIndex :: Int -> CallSequence a -> CallTree a
+callTreeIndex index (CallSequence ts) = ts !! index
 
 --------------------------------------------------------------------------------
 -- Input

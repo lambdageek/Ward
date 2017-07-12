@@ -48,7 +48,7 @@ data Function = Function
   , functionPermissions :: !PermissionActionSet
 
   -- | A tree of callees of this function.
-  , functionCalls :: !(CallTree FunctionName)
+  , functionCalls :: !(CallSequence FunctionName)
   }
 
 -- | A node in the call graph, representing a function and information about
@@ -63,7 +63,7 @@ data Node = Node
   , nodeAnnotations :: !(IORef PermissionActionSet)
 
   -- | The callees of this function.
-  , nodeCalls :: !(CallTree FunctionName)
+  , nodeCalls :: !(CallSequence FunctionName)
 
   -- | One more than the number of callees, representing the permission state
   -- before and after each call.
@@ -357,7 +357,7 @@ inferPermissionsSCC implicitPermissions graphLookup graphVertex scc = do
         if getAny shouldContinue then loop else pure ()
 
 propagatePermissionsNode :: (Graph.Vertex -> (Node, t1, t))
-                       -> (Node, Site, FunctionName, CallTree (Maybe Graph.Vertex))
+                       -> (Node, Site, FunctionName, CallSequence (Maybe Graph.Vertex))
                        -> IO Any
 propagatePermissionsNode graphLookup (node, newInitialSite, name, callVertices) = do
         let
@@ -373,12 +373,46 @@ propagatePermissionsNode graphLookup (node, newInitialSite, name, callVertices) 
 
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
-        processCallTree graphLookup callVertices 0 sites
+        processCallSequence graphLookup callVertices 0 sites
 
         initial <- IOVector.read sites 0
         final <- IOVector.read sites (IOVector.length sites - 1)
         permissionsFromCallSites (nodePermissions node) (initial, final)
 
+
+processCallSequence :: (Graph.Vertex -> (Node, t1, t))
+                    -> CallSequence (Maybe Graph.Vertex)
+                    -> Int
+                    -> IOVector Site
+                    -> IO ()
+processCallSequence graphLookup s i v =
+  case viewlCallSequence s of
+    Just (a,b) -> do
+            processCallTree graphLookup a i v
+            processCallSequence graphLookup b (succ i) v
+
+            -- Once we've collected permission information for each call site
+            -- and propagated it forward, we propagate all /non-conflicting/
+            -- information /backward/ through the whole sequence; this has the
+            -- effect of filling in the 0th call site (before the first call) in
+            -- a function with any relevant permissions from the body of the
+            -- function.
+            --
+            -- FIXME: I think we could do this purely, because only the result
+            -- at index 0 should matter at this point.
+            --
+            -- FIXME: We also get hear when we're at the head of a Choice
+            -- (because it works in a copy of the vector), is this the right
+            -- thing to do there?
+            when (i == 0) $ do
+              for_ (reverse [1 .. IOVector.length v - 1]) $ \ statement -> do
+                after <- IOVector.read v statement
+                flip (IOVector.modify v) (pred statement) $ \ before
+                  -> before <> (foldr HashSet.delete after
+                    $ concatMap (\p -> [Has p, Lacks p, Uses p])
+                    $ map presencePermission
+                    $ HashSet.toList before)
+    Nothing -> pure ()
 
 -- | Given a call tree and the permission presence set at the current site (as
 -- an index into a vector of sites), update the current site and the following one
@@ -391,39 +425,14 @@ processCallTree :: (Graph.Vertex -> (Node, t1, t)) -- graphLookup
 processCallTree graphLookup (Choice a b) i v = do
             callsA <- IOVector.replicate (callTreeBreadth a + 1) mempty
             callsB <- IOVector.replicate (callTreeBreadth b + 1) mempty
-            processCallTree graphLookup a 0 callsA
-            processCallTree graphLookup b 0 callsB
+            processCallSequence graphLookup a 0 callsA
+            processCallSequence graphLookup b 0 callsB
             beforeA <- IOVector.read callsA 0
             afterA <- IOVector.read callsA (IOVector.length callsA - 1)
             beforeB <- IOVector.read callsB 0
             afterB <- IOVector.read callsB (IOVector.length callsB - 1)
             IOVector.write v i (beforeA <> beforeB)
             IOVector.write v (succ i) (afterA <> afterB)
-
-processCallTree graphLookup s@(Sequence a b) i v = do
-            processCallTree graphLookup a i v
-            processCallTree graphLookup b (i + callTreeBreadth a) v
-
-            -- Once we've collected permission information for each call site
-            -- and propagated it forward, we propagate all /non-conflicting/
-            -- information /backward/ through the whole sequence; this has the
-            -- effect of filling in the 0th call site (before the first call) in
-            -- a function with any relevant permissions from the body of the
-            -- function.
-            --
-            -- This assumes that 'Sequence's are right-associative, ensuring
-            -- we're at the root of a sequence if @i@ is @0@.
-            --
-            -- FIXME: I think we could do this purely, because only the result
-            -- at index 0 should matter at this point.
-            when (i == 0) $ do
-              for_ (reverse [1 .. IOVector.length v - 1]) $ \ statement -> do
-                after <- IOVector.read v statement
-                flip (IOVector.modify v) (pred statement) $ \ before
-                  -> before <> (foldr HashSet.delete after
-                    $ concatMap (\p -> [Has p, Lacks p, Uses p])
-                    $ map presencePermission
-                    $ HashSet.toList before)
 
 processCallTree graphLookup (Call (Just call)) i v = do
             let (Node { nodePermissions = callPermissionsRef }, callName, _) = graphLookup call
@@ -509,7 +518,7 @@ processCallTree _ (Call Nothing) _ _ =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
                 pure ()
-processCallTree _ Nop _ _ = pure ()
+
 
 -- After processing a call tree, we can infer its permission actions
 -- based on the permissions in the first and last call sites.
@@ -685,7 +694,7 @@ reportDefinition implicitPermissions restrictions requiredPermissions (annotatio
 -- | Report violations at the calls in the given function due to
 -- callee functions with conflicting permissions or violated restrictions.
 reportCallSites :: [Restriction]
-                -> ([Site], CallTree FunctionName, FunctionName, NodeInfo)
+                -> ([Site], CallSequence FunctionName, FunctionName, NodeInfo)
                 -> Logger ()
 reportCallSites restrictions (sites, callees, name, pos) = do
       -- Report call sites with conflicting information.
