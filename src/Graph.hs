@@ -13,7 +13,7 @@ import Data.Generics
 import Data.Monoid ((<>))
 import Language.C.Data.Ident (Ident(..))
 import qualified Language.C.Data.Ident
-import Language.C.Syntax.AST -- *
+import Language.C.Syntax.AST -- \*
 import Types
 import qualified Data.HashSet as HashSet
 import qualified Data.Map as Map
@@ -199,7 +199,7 @@ callMapFromNameMap = Map.fromList . map fromEntry . Map.toList
       CIf expr stat1 mStat2 _pos
         -> fromExpression expr
         <> singletonCallSequence (fromStatement stat1 `Choice` foldMap fromStatement mStat2)
-      -- | switch statement @CSwitch selectorExpr switchStmt@, where
+      -- switch statement @CSwitch selectorExpr switchStmt@, where
       -- @switchStmt@ usually includes /case/, /break/ and /default/
       -- statements
       CSwitch expr stat _pos
