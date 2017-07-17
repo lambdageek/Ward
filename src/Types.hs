@@ -22,7 +22,7 @@ import GHC.Generics (Generic)
 import Language.C.Data.Ident (Ident(..))
 import Language.C.Data.Node (NodeInfo(..))
 import Language.C.Data.Position (posFile, posRow)
-import Language.C.Syntax.AST -- *
+import Language.C.Syntax.AST -- \*
 import qualified Language.C.Parser as CParser
 import qualified Data.Map as Map
 import qualified Data.Sequence as Sequence
@@ -190,7 +190,7 @@ type CallMap = Map Ident (NodeInfo, CallSequence Ident, PermissionActionSet)
 data CallTree a
   = Choice !(CallSequence a) !(CallSequence a)
   | Call !a
-  -- | Abort  - the Monoid identity for 'CallTree' with respect to the 'Choice' operator
+  -- Abort  - the Monoid identity for 'CallTree' with respect to the 'Choice' operator
   deriving (Eq, Foldable, Functor, Traversable)
 
 newtype CallSequence a
