@@ -469,47 +469,19 @@ permissionsPresenceFromCalleeActions :: Int
                                      -> PermissionAction
                                      -> IO ()
 permissionsPresenceFromCalleeActions i v callPermission = do
-  flip (IOVector.modify v) i $ \current -> case callPermission of
+  flip (IOVector.modify v) i $ \current -> current \/ getJoin (actionPrecondition callPermission)
+  flip (IOVector.modify v) (succ i) $ strongUpdateCap callPermission
 
-                -- If a call needs (resp. denies) a permission, its call site
-                -- must have (lack) it. If the call site already lacks (has) it,
-                -- we record the conflict.
-
-                Need p -> current \/ singletonPresence p has
-
-                Use p -> current \/ singletonPresence p (has \/ uses)
-
-                Deny p -> current \/ singletonPresence p lacks
-
-                -- If a call grants (resp. revokes) a permission, its call site
-                -- must lack (have) it, and the following call site must have
-                -- (lack) it. If the current call site already has (lacks) it,
-                -- we record the conflict. But if the following call site
-                -- already lacks (has) it, we replace it to reflect the change
-                -- in permission state.
-
-                Grant p ->
-                  current \/ singletonPresence p lacks
-
-                Revoke p -> current \/ singletonPresence p has
-
-                -- FIXME: Verify this.
-                Waive{} -> current
-  flip (IOVector.modify v) (succ i) $ case callPermission of
-    Grant p -> strongUpdateCap p CapHas
-    Revoke p -> strongUpdateCap p CapLacks
-    _ -> id
-
-strongUpdateCap :: PermissionName -> Capability -> PermissionPresenceSet -> PermissionPresenceSet
-strongUpdateCap pn cap =
-  PermissionPresenceSet . HashMap.alter alteration pn . unPermissionPresenceSet
+strongUpdateCap :: PermissionAction -> PermissionPresenceSet -> PermissionPresenceSet
+strongUpdateCap act =
+  let
+    pn = permissionActionName act
+  in modifyPresence pn update
   where
-    alteration mold =
-      let
-        usage = case mold of
-                  Nothing -> bottom
-                  Just old -> presenceUsage old
-      in Just $ PermissionPresence usage cap
+    update old = dropCapability old \/ actionPostcondition act
+     -- uses = (Uses, CapUnknown) so the effect of dropCapability is to leave
+     -- Usage unchanged and cut Capability back down to CapUnknown
+    dropCapability x = x /\ uses
 
 -- After processing a call tree, we can infer its permission actions
 -- based on the permissions in the first and last call sites.
@@ -769,23 +741,27 @@ validatePermissions config =
 -- compute the permission presense available on entry to the function.
 initialSite :: [PermissionAction] -> Site
 initialSite =
-  getJoin . foldMap siteAction
-  where
-    siteAction :: PermissionAction -> Join Site
-    siteAction permissionAction = case permissionAction of
-      -- If a function needs or revokes a permission, then its first call
-      -- site must have that permission.
-      Need p -> site p has
-      Use p -> site p uses
-      Revoke p -> site p has
+  getJoin . foldMap actionPrecondition
 
-      -- If a function grants or denies a permission, then its first call
-      -- site must lack that permission.
-      Grant p -> site p lacks
-      Deny p -> site p lacks
+-- | Given the permission action of a call, return
+-- the permission presence that must be true /prior/ to the call.
+--
+-- If a call needs, uses or revokes a permission, then it must have that
+-- permission prior to the call.  (And if it uses it, it must indicate
+-- that too).
+-- If a call grants or denies a permission, then it must lack it prior to the call
+actionPrecondition :: PermissionAction -> Join Site
+actionPrecondition (Need p) = site p has
+actionPrecondition (Use p) = site p (uses \/ has)
+actionPrecondition (Revoke p) = site p has
+actionPrecondition (Deny p) = site p lacks
+actionPrecondition (Grant p) = site p lacks
+actionPrecondition (Waive _p) = mempty
 
-      -- FIXME: Verify this.
-      Waive{} -> mempty
+actionPostcondition :: PermissionAction -> PermissionPresence
+actionPostcondition (Grant {}) = has
+actionPostcondition (Revoke {}) = lacks
+actionPostcondition _ = bottom
 
 -- | Convenience function for building call site info.
 site :: PermissionName -> PermissionPresence -> Join Site
