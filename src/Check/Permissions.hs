@@ -61,8 +61,8 @@ data Node = Node
   -- by annotations, and updated as permissions are propagated.
     nodePermissions :: !(IORef PermissionActionSet)
 
-  -- | The annotated permission actions of the function.
-  , nodeAnnotations :: !(IORef PermissionActionSet)
+  -- | The initial annotated permission actions of the function.
+  , nodeAnnotations :: !PermissionActionSet
 
   -- | The callees of this function.
   , nodeCalls :: !(CallSequence FunctionName)
@@ -562,11 +562,9 @@ reportSCC requiredAnnotations restrictions graphLookup scc = do
         name = nodeName node
         pos = nodePos node
         requiredPermissions = lookup name requiredAnnotations
+        annotations = nodeAnnotations node
       do
-        (annotations, permissions) <- liftIO $ do
-          a <- readIORef $ nodeAnnotations node
-          p <- readIORef $ nodePermissions node
-          return (a,p)
+        permissions <- liftIO $ readIORef $ nodePermissions node
         reportDefinition restrictions requiredPermissions (annotations, permissions, name, pos)
       do
         sites <- liftIO $ fmap Vector.toList $ Vector.freeze $ nodeSites node
@@ -680,9 +678,9 @@ edgesFromFunctions functions = do
   for_ functions $ \ function -> do
     let name = functionName function
     permissions <- newIORef $ functionPermissions function
-    annotations <- newIORef $ functionPermissions function
     sites <- IOVector.replicate (callTreeBreadth (functionCalls function) + 1) bottom
     let
+      annotations = functionPermissions function
       node =
         ( Node
           { nodePermissions = permissions
