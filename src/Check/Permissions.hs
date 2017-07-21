@@ -67,9 +67,9 @@ data Node = Node
   -- | The callees of this function.
   , nodeCalls :: !(CallSequence FunctionName)
 
-  -- | One more than the number of callees, representing the permission state
-  -- before and after each call.
-  , nodeSites :: !(IOVector Site)
+  -- | The permission states inferred as the pre- and post- conditions of this function, from its callees.
+  , nodeSitePre :: !(IORef Site)
+  , nodeSitePost :: !(IORef Site)
 
   -- | The original name of this function, for error reporting.
   , nodeName :: !FunctionName
@@ -359,11 +359,12 @@ propagatePermissionsNode :: (Graph.Vertex -> (Node, t1, t))
                        -> IO Any
 propagatePermissionsNode graphLookup (node, newInitialSite, name, callVertices) = do
         let
-          sites = nodeSites node
+          sitePre = nodeSitePre node
+          sitePost = nodeSitePost node
 
         -- We initialize the first call site of the function according to its
         -- permission actions.
-        IOVector.modify sites (\old -> old \/ newInitialSite) 0
+        modifyIORef' sitePre (\old -> old \/ newInitialSite)
 
         -- Next, we infer information about permissions at each call site in the
         -- function by traversing its call tree.
@@ -371,23 +372,23 @@ propagatePermissionsNode graphLookup (node, newInitialSite, name, callVertices) 
 
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
-        processCallSequence graphLookup callVertices 0 sites
+        processCallSequence graphLookup callVertices (sitePre,sitePost)
 
-        initial <- IOVector.read sites 0
-        final <- IOVector.read sites (IOVector.length sites - 1)
+        initial <- readIORef sitePre
+        final <- readIORef sitePost
         permissionsFromCallSites (nodePermissions node) (initial, final)
 
 
 processCallSequence :: (Graph.Vertex -> (Node, t1, t))
                     -> CallSequence (Maybe Graph.Vertex)
-                    -> Int
-                    -> IOVector Site
+                    -> (IORef Site, IORef Site)
                     -> IO ()
-processCallSequence graphLookup s i v =
+processCallSequence graphLookup s (sitePre,sitePost) =
   case viewlCallSequence s of
     Just (a,b) -> do
-            processCallTree graphLookup a i v
-            processCallSequence graphLookup b (succ i) v
+            siteMid <- newIORef bottom
+            processCallTree graphLookup a (sitePre, siteMid)
+            processCallSequence graphLookup b (siteMid, sitePost)
 
             -- Once we've collected permission information for each call site
             -- and propagated it forward, we propagate all new or /newly-conflicting/
@@ -402,11 +403,10 @@ processCallSequence graphLookup s i v =
             -- FIXME: We also get hear when we're at the head of a Choice
             -- (because it works in a copy of the vector), is this the right
             -- thing to do there?
-            when (i == 0) $ do
-              for_ (reverse [1 .. IOVector.length v - 2]) $ \ statement -> do
-                after <- IOVector.read v statement
-                flip (IOVector.modify v) (pred statement) $ \ before
-                  -> before \/ permissionDiff after before
+            finalPost <- readIORef sitePost
+            modifyIORef' siteMid (\before -> before \/ permissionDiff finalPost before)
+            finalMid <- readIORef siteMid
+            modifyIORef' sitePre (\before -> before \/ permissionDiff finalMid before)
     Nothing -> pure ()
   where
     permissionDiff (PermissionPresenceSet x) (PermissionPresenceSet y) =
@@ -419,22 +419,23 @@ processCallSequence graphLookup s i v =
 -- with the new permission presence set.
 processCallTree :: (Graph.Vertex -> (Node, t1, t)) -- graphLookup
                 -> CallTree (Maybe Graph.Vertex)   -- input
-                -> Int                             -- offset within current sequence
-                -> IOVector Site                   -- current sequence
+                -> (IORef Site, IORef Site)        -- permissions prior and after this calltree
                 -> IO ()
-processCallTree graphLookup (Choice a b) i v = do
-            callsA <- IOVector.replicate (callTreeBreadth a + 1) bottom
-            callsB <- IOVector.replicate (callTreeBreadth b + 1) bottom
-            processCallSequence graphLookup a 0 callsA
-            processCallSequence graphLookup b 0 callsB
-            beforeA <- IOVector.read callsA 0
-            afterA <- IOVector.read callsA (IOVector.length callsA - 1)
-            beforeB <- IOVector.read callsB 0
-            afterB <- IOVector.read callsB (IOVector.length callsB - 1)
-            IOVector.write v i (beforeA \/ beforeB)
-            IOVector.write v (succ i) (afterA \/ afterB)
+processCallTree graphLookup (Choice a b) (sitePre,sitePost) = do
+            leftPre <- newIORef bottom
+            leftPost <- newIORef bottom
+            rightPre <- newIORef bottom
+            rightPost <- newIORef bottom
+            processCallSequence graphLookup a (leftPre, leftPost)
+            processCallSequence graphLookup b (rightPre, rightPost)
+            beforeA <- readIORef leftPre
+            afterA <- readIORef leftPost
+            beforeB <- readIORef rightPre
+            afterB <- readIORef rightPost
+            modifyIORef' sitePre (\x -> x \/ beforeA \/ beforeB)
+            modifyIORef' sitePost (\x -> x \/ afterA \/ afterB)
 
-processCallTree graphLookup (Call (Just call)) i v = do
+processCallTree graphLookup (Call (Just call)) (sitePre,sitePost) = do
             let (Node { nodePermissions = callPermissionsRef }, callName, _) = graphLookup call
             callPermissions <- readIORef callPermissionsRef
 
@@ -442,15 +443,16 @@ processCallTree graphLookup (Call (Just call)) i v = do
             -- at each step. This ensures that the /final/ call site (after the
             -- last call) contains relevant permissions from the body of the
             -- function.
-            IOVector.write v (succ i)
-              =<< IOVector.read v i
+            do
+              pre <- readIORef sitePre
+              modifyIORef' sitePost (\/ pre)
 
             -- Update permission presence (has/lacks/conflicts) according to
             -- permission actions (needs/denies/grants/revokes).
             --
-            for_ (HashSet.toList callPermissions) $ permissionsPresenceFromCalleeActions i v
+            for_ (HashSet.toList callPermissions) $ permissionsPresenceFromCalleeActions (sitePre,sitePost)
 
-processCallTree _ (Call Nothing) _ _ =
+processCallTree _ (Call Nothing) _ =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
                 pure ()
@@ -464,13 +466,12 @@ processCallTree _ (Call Nothing) _ _ =
 -- generate a conflict unless there's actually conflicting info. And
 -- if some permission is irrelevant to a particular call, it just
 -- passes on through.
-permissionsPresenceFromCalleeActions :: Int
-                                     -> IOVector Site
+permissionsPresenceFromCalleeActions :: (IORef Site, IORef Site)
                                      -> PermissionAction
                                      -> IO ()
-permissionsPresenceFromCalleeActions i v callPermission = do
-  flip (IOVector.modify v) i $ \current -> current \/ getJoin (actionPrecondition callPermission)
-  flip (IOVector.modify v) (succ i) $ strongUpdateCap callPermission
+permissionsPresenceFromCalleeActions (sitePre,sitePost) callPermission = do
+  modifyIORef' sitePre $ \current -> current \/ getJoin (actionPrecondition callPermission)
+  modifyIORef' sitePost $ strongUpdateCap callPermission
 
 strongUpdateCap :: PermissionAction -> PermissionPresenceSet -> PermissionPresenceSet
 strongUpdateCap act =
@@ -501,13 +502,14 @@ permissionsFromCallSites permissionRef initialFinal@(initial, final) = do
             finalActions `seq` writeIORef permissionRef finalActions
             let
               modifiedSize = HashSet.size finalActions
+              change = (modifiedSize /= currentSize) || (finalActions /= initialActions)
 
             -- If we added permissions, the inferred set of permissions for this
             -- SCC may still be growing, so we re-process the SCC until we reach a
             -- fixed point.
             --
             -- TODO: Limit the number of iterations to prevent infinite loops.
-            pure $ Any $ modifiedSize > currentSize
+            change `seq` pure (Any change)
 
 -- Given the initial and final call sites and a permission P, determine the action
 -- of the function with respect to P by considering its presence or absence at function entry and exit.
@@ -563,12 +565,12 @@ reportSCC requiredAnnotations restrictions graphLookup scc = do
         pos = nodePos node
         requiredPermissions = lookup name requiredAnnotations
         annotations = nodeAnnotations node
-      do
-        permissions <- liftIO $ readIORef $ nodePermissions node
-        reportDefinition restrictions requiredPermissions (annotations, permissions, name, pos)
-      do
-        sites <- liftIO $ fmap Vector.toList $ Vector.freeze $ nodeSites node
-        reportCallSites restrictions (sites, nodeCalls node, name, pos)
+
+      permissions <- liftIO $ readIORef $ nodePermissions node
+      reportDefinition restrictions requiredPermissions (annotations, permissions, name, pos)
+
+      (sitePre, sitePost) <- liftIO ((,) <$> readIORef (nodeSitePre node) <*> readIORef (nodeSitePost node) )
+      reportCallSites restrictions (sitePre, sitePost, nodeCalls node, name, pos)
 
 
 -- | Report violations at the function definitino due to missing required annotations,
@@ -631,11 +633,11 @@ reportDefinition restrictions requiredPermissions (annotations, permissions, nam
 -- | Report violations at the calls in the given function due to
 -- callee functions with conflicting permissions or violated restrictions.
 reportCallSites :: [Restriction]
-                -> ([Site], CallSequence FunctionName, FunctionName, NodeInfo)
+                -> (Site, Site, CallSequence FunctionName, FunctionName, NodeInfo)
                 -> Logger ()
-reportCallSites restrictions (sites, callees, name, pos) = do
+reportCallSites restrictions (sitePre, sitePost, callees, name, pos) = do
       -- Report call sites with conflicting information.
-      let conflicts = getJoin $ foldMap (Join . conflictingPresence) sites
+      let conflicts = conflictingPresence sitePre \/ conflictingPresence sitePost
       unless (nullPresence conflicts) $ do
         record True $ Error pos $ Text.concat $
           [ "conflicting information for permissions "
@@ -645,8 +647,10 @@ reportCallSites restrictions (sites, callees, name, pos) = do
           , "'"
           ]
 
+      -- FIXME: need to re-compute the intermediate sites and check their restrictions
+
       -- For each call site, check every restriction and report any violations.
-      for_ (zip [0 :: Int ..] sites) $ \ (index, s) -> do
+      for_ (zip [0 :: Int ..] [sitePre,sitePost]) $ \ (index, s) -> do
         let
           position = case index of
             0 -> ["before first call"]
@@ -678,7 +682,8 @@ edgesFromFunctions functions = do
   for_ functions $ \ function -> do
     let name = functionName function
     permissions <- newIORef $ functionPermissions function
-    sites <- IOVector.replicate (callTreeBreadth (functionCalls function) + 1) bottom
+    sitePre <- newIORef bottom
+    sitePost <- newIORef bottom
     let
       annotations = functionPermissions function
       node =
@@ -686,7 +691,8 @@ edgesFromFunctions functions = do
           { nodePermissions = permissions
           , nodeAnnotations = annotations
           , nodeCalls = functionCalls function
-          , nodeSites = sites
+          , nodeSitePre = sitePre
+          , nodeSitePost = sitePost
           , nodeName = name
           , nodePos = functionPos function
           }
