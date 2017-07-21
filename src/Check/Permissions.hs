@@ -368,27 +368,30 @@ propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInit
           graphLookup' call =  do
             let (Node { nodePermissions = callPermissionsRef }, _callName, _) = graphLookup call
             readIORef callPermissionsRef
+        -- replace each Graph.Vertex by its current PermissionActionSet
+        --
+        -- callPermissions :: CallSequence (Maybe PermissionActionSet)
+        callPermissions <- traverse (traverse graphLookup') callVertices
         -- Next, we infer information about permissions at each call site in the
         -- function by traversing its call tree.
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
         initialPre <- readIORef sitePre
         initialPost <- readIORef sitePost
-        (finalPre, finalPost) <- processCallSequence graphLookup' callVertices (initialPre,initialPost)
+        (finalPre, finalPost) <- processCallSequence callPermissions (initialPre,initialPost)
         writeIORef sitePre finalPre
         writeIORef sitePost finalPost
         writePermissionsFromInferred permissionsRef (finalPre, finalPost)
 
 
-processCallSequence :: (vertex -> IO PermissionActionSet)
-                    -> CallSequence (Maybe vertex)
+processCallSequence :: CallSequence (Maybe PermissionActionSet)
                     -> (Site, Site)
                     -> IO (Site, Site)
-processCallSequence graphLookup s (initialPre, initialPost) =
+processCallSequence s (initialPre, initialPost) =
   case viewlCallSequence s of
     Just (a,b) -> do
-            (fwdPre, fstMid) <- processCallTree graphLookup a (initialPre, bottom)
-            (fwdMid, finalPost) <- processCallSequence graphLookup b (fstMid, initialPost)
+            (fwdPre, fstMid) <- processCallTree a (initialPre, bottom)
+            (fwdMid, finalPost) <- processCallSequence b (fstMid, initialPost)
 
             -- Once we've collected permission information for each call site
             -- and propagated it forward, we propagate all new or /newly-conflicting/
@@ -411,21 +414,18 @@ processCallSequence graphLookup s (initialPre, initialPost) =
 -- | Given a call tree and the permission presence set at the current site (as
 -- an index into a vector of sites), update the current site and the following one
 -- with the new permission presence set.
-processCallTree :: (vertex -> IO PermissionActionSet) -- graphLookup
-                -> CallTree (Maybe vertex)         -- input
+processCallTree :: CallTree (Maybe PermissionActionSet)         -- input
                 -> (Site, Site)        -- permissions prior and after this calltree
                 -> IO (Site, Site)
-processCallTree graphLookup (Choice a b) (initialPre, initialPost) = do
-            (beforeA, afterA) <- processCallSequence graphLookup a bottom
-            (beforeB, afterB) <- processCallSequence graphLookup b bottom
+processCallTree (Choice a b) (initialPre, initialPost) = do
+            (beforeA, afterA) <- processCallSequence a bottom
+            (beforeB, afterB) <- processCallSequence b bottom
             let
               finalPre = initialPre \/ beforeA \/ beforeB
               finalPost = initialPost \/ afterA \/ afterB
             finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
-processCallTree graphLookup (Call (Just call)) (initialPre, initialPost) = do
-            callPermissions <- graphLookup call
-
+processCallTree (Call (Just callPermissions)) (initialPre, initialPost) = do
             -- We propagate permissions forward in the call tree
             -- at each step. This ensures that the /final/ call site (after the
             -- last call) contains relevant permissions from the body of the
@@ -439,7 +439,7 @@ processCallTree graphLookup (Call (Just call)) (initialPre, initialPost) = do
                 = HashSet.foldl' permissionsPresenceFromCalleeActions (initialPre, fwdPost) callPermissions
             finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
-processCallTree _ (Call Nothing) initialPrePost =
+processCallTree (Call Nothing) initialPrePost =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
                 pure initialPrePost
