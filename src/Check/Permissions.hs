@@ -345,7 +345,8 @@ inferPermissionsSCC implicitPermissions graphLookup graphVertex scc = do
             , not $ Waive p `HashSet.member` permissionActions
             ]
           nodePermissionActions = HashSet.toList permissionActions <> implicitPermissionActions
-        nodeGrowing <- propagatePermissionsNode graphLookup (node, initialSite nodePermissionActions, name, graphVertex <$> nodeCalls node)
+
+        nodeGrowing <- propagatePermissionsNode graphLookup (nodeSitePre node, nodeSitePost node, nodePermissions node, initialSite nodePermissionActions, name, graphVertex <$> nodeCalls node)
         modifyIORef' growing (<> nodeGrowing)
 
       -- We continue processing the current SCC if we're still propagating
@@ -355,40 +356,34 @@ inferPermissionsSCC implicitPermissions graphLookup graphVertex scc = do
         if getAny shouldContinue then loop else pure ()
 
 propagatePermissionsNode :: (Graph.Vertex -> (Node, t1, t))
-                       -> (Node, Site, FunctionName, CallSequence (Maybe Graph.Vertex))
+                       -> (IORef Site, IORef Site, IORef PermissionActionSet, Site, FunctionName, CallSequence (Maybe Graph.Vertex))
                        -> IO Any
-propagatePermissionsNode graphLookup (node, newInitialSite, name, callVertices) = do
-        let
-          sitePre = nodeSitePre node
-          sitePost = nodeSitePost node
-
+propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInitialSite, name, callVertices) = do
         -- We initialize the first call site of the function according to its
         -- permission actions.
         modifyIORef' sitePre (\old -> old \/ newInitialSite)
 
         -- Next, we infer information about permissions at each call site in the
         -- function by traversing its call tree.
-        let
-
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
         processCallSequence graphLookup callVertices (sitePre,sitePost)
 
         initial <- readIORef sitePre
         final <- readIORef sitePost
-        permissionsFromCallSites (nodePermissions node) (initial, final)
+        writePermissionsFromInferred permissionsRef (initial, final)
 
 
 processCallSequence :: (Graph.Vertex -> (Node, t1, t))
                     -> CallSequence (Maybe Graph.Vertex)
                     -> (IORef Site, IORef Site)
-                    -> IO ()
+                    -> IO (Site, Site)
 processCallSequence graphLookup s (sitePre,sitePost) =
   case viewlCallSequence s of
     Just (a,b) -> do
             siteMid <- newIORef bottom
-            processCallTree graphLookup a (sitePre, siteMid)
-            processCallSequence graphLookup b (siteMid, sitePost)
+            (fwdPre, _fstMid) <- processCallTree graphLookup a (sitePre, siteMid)
+            (fwdMid, finalPost) <- processCallSequence graphLookup b (siteMid, sitePost)
 
             -- Once we've collected permission information for each call site
             -- and propagated it forward, we propagate all new or /newly-conflicting/
@@ -396,18 +391,13 @@ processCallSequence graphLookup s (sitePre,sitePost) =
             -- effect of filling in the 0th call site (before the first call) in
             -- a function with any relevant permissions from the body of the
             -- function.
-            --
-            -- FIXME: I think we could do this purely, because only the result
-            -- at index 0 should matter at this point.
-            --
-            -- FIXME: We also get hear when we're at the head of a Choice
-            -- (because it works in a copy of the vector), is this the right
-            -- thing to do there?
-            finalPost <- readIORef sitePost
-            modifyIORef' siteMid (\before -> before \/ permissionDiff finalPost before)
-            finalMid <- readIORef siteMid
-            modifyIORef' sitePre (\before -> before \/ permissionDiff finalMid before)
-    Nothing -> pure ()
+            let
+              update before after = before \/ permissionDiff after before
+              finalMid = update fwdMid finalPost
+              finalPre = update fwdPre finalMid
+            finalPre `seq` writeIORef sitePre finalPre
+            return (finalPre, finalPost)
+    Nothing -> (,) <$> readIORef sitePre <*> readIORef sitePost
   where
     permissionDiff (PermissionPresenceSet x) (PermissionPresenceSet y) =
       PermissionPresenceSet (HashMap.differenceWith keepConflicting x y)
@@ -420,20 +410,22 @@ processCallSequence graphLookup s (sitePre,sitePost) =
 processCallTree :: (Graph.Vertex -> (Node, t1, t)) -- graphLookup
                 -> CallTree (Maybe Graph.Vertex)   -- input
                 -> (IORef Site, IORef Site)        -- permissions prior and after this calltree
-                -> IO ()
+                -> IO (Site, Site)
 processCallTree graphLookup (Choice a b) (sitePre,sitePost) = do
             leftPre <- newIORef bottom
             leftPost <- newIORef bottom
             rightPre <- newIORef bottom
             rightPost <- newIORef bottom
-            processCallSequence graphLookup a (leftPre, leftPost)
-            processCallSequence graphLookup b (rightPre, rightPost)
-            beforeA <- readIORef leftPre
-            afterA <- readIORef leftPost
-            beforeB <- readIORef rightPre
-            afterB <- readIORef rightPost
+            (beforeA, afterA) <- processCallSequence graphLookup a (leftPre, leftPost)
+            (beforeB, afterB) <- processCallSequence graphLookup b (rightPre, rightPost)
+            initialPre <- readIORef sitePre
+            initialPost <- readIORef sitePost
             modifyIORef' sitePre (\x -> x \/ beforeA \/ beforeB)
             modifyIORef' sitePost (\x -> x \/ afterA \/ afterB)
+            let
+              finalPre = initialPre \/ beforeA \/ beforeB
+              finalPost = initialPost \/ afterA \/ afterB
+            finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
 processCallTree graphLookup (Call (Just call)) (sitePre,sitePost) = do
             let (Node { nodePermissions = callPermissionsRef }, callName, _) = graphLookup call
@@ -451,13 +443,14 @@ processCallTree graphLookup (Call (Just call)) (sitePre,sitePost) = do
             -- permission actions (needs/denies/grants/revokes).
             --
             for_ (HashSet.toList callPermissions) $ permissionsPresenceFromCalleeActions (sitePre,sitePost)
+            finalPre <- readIORef sitePre
+            finalPost <- readIORef sitePost
+            return (finalPre, finalPost)
 
-processCallTree _ (Call Nothing) _ =
+processCallTree _ (Call Nothing) (sitePre, sitePost) =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
-                pure ()
-
-
+                (,) <$> readIORef sitePre <*> readIORef sitePost
 
 -- Note how this works with the forward-propagation above: if a call
 -- site grants or revokes a permission for which information was
@@ -484,10 +477,12 @@ strongUpdateCap act =
      -- Usage unchanged and cut Capability back down to CapUnknown
     dropCapability x = x /\ uses
 
--- After processing a call tree, we can infer its permission actions
--- based on the permissions in the first and last call sites.
-permissionsFromCallSites :: IORef PermissionActionSet -> (Site, Site) -> IO Any
-permissionsFromCallSites permissionRef initialFinal@(initial, final) = do
+-- After processing a call tree, write back its updated permission actions
+-- based on the permissions inferred before the first and after the last call
+-- sites.  Returns @Any True@ if the permissions changed since the last
+-- iteration, or @Any False@ if they stayed the same.
+writePermissionsFromInferred :: IORef PermissionActionSet -> (Site, Site) -> IO Any
+writePermissionsFromInferred permissionRef initialFinal@(initial, final) = do
             initialActions <- readIORef permissionRef
             let currentSize = HashSet.size initialActions
 
