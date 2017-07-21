@@ -363,20 +363,25 @@ propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInit
         -- permission actions.
         modifyIORef' sitePre (\old -> old \/ newInitialSite)
 
+        let
+          graphLookup' :: Graph.Vertex -> IO PermissionActionSet
+          graphLookup' call =  do
+            let (Node { nodePermissions = callPermissionsRef }, _callName, _) = graphLookup call
+            readIORef callPermissionsRef
         -- Next, we infer information about permissions at each call site in the
         -- function by traversing its call tree.
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
         initialPre <- readIORef sitePre
         initialPost <- readIORef sitePost
-        (finalPre, finalPost) <- processCallSequence graphLookup callVertices (initialPre,initialPost)
+        (finalPre, finalPost) <- processCallSequence graphLookup' callVertices (initialPre,initialPost)
         writeIORef sitePre finalPre
         writeIORef sitePost finalPost
         writePermissionsFromInferred permissionsRef (finalPre, finalPost)
 
 
-processCallSequence :: (Graph.Vertex -> (Node, t1, t))
-                    -> CallSequence (Maybe Graph.Vertex)
+processCallSequence :: (vertex -> IO PermissionActionSet)
+                    -> CallSequence (Maybe vertex)
                     -> (Site, Site)
                     -> IO (Site, Site)
 processCallSequence graphLookup s (initialPre, initialPost) =
@@ -406,8 +411,8 @@ processCallSequence graphLookup s (initialPre, initialPost) =
 -- | Given a call tree and the permission presence set at the current site (as
 -- an index into a vector of sites), update the current site and the following one
 -- with the new permission presence set.
-processCallTree :: (Graph.Vertex -> (Node, t1, t)) -- graphLookup
-                -> CallTree (Maybe Graph.Vertex)   -- input
+processCallTree :: (vertex -> IO PermissionActionSet) -- graphLookup
+                -> CallTree (Maybe vertex)         -- input
                 -> (Site, Site)        -- permissions prior and after this calltree
                 -> IO (Site, Site)
 processCallTree graphLookup (Choice a b) (initialPre, initialPost) = do
@@ -419,8 +424,7 @@ processCallTree graphLookup (Choice a b) (initialPre, initialPost) = do
             finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
 processCallTree graphLookup (Call (Just call)) (initialPre, initialPost) = do
-            let (Node { nodePermissions = callPermissionsRef }, callName, _) = graphLookup call
-            callPermissions <- readIORef callPermissionsRef
+            callPermissions <- graphLookup call
 
             -- We propagate permissions forward in the call tree
             -- at each step. This ensures that the /final/ call site (after the
