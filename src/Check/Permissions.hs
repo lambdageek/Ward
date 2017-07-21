@@ -515,6 +515,17 @@ updatePermissionActions initialActions initialFinal@(initial,final) =
               -- SCC may still be growing, so we re-process the SCC until we reach a
               -- fixed point.
               change = (modifiedSize /= currentSize) || (finalActions /= initialActions)
+
+              -- FIXME: At this point it maybe useful to compute another piece
+              -- of information: a set of PermissionNames that are mapped to
+              -- 'CapConflict' by the initial or final 'Site'.  The reason is
+              -- because in some sense PermissionActionSet is a summary of the
+              -- information we can glean from @(initial,final)@.  If
+              -- 'PermissionActionSet' was isomorphic to @(Site,Site)@, we
+              -- could throw the 'Site's away between iterations.  But the pair
+              -- of sites has additional information - precisely the conflicts!
+              -- (Also I think @('Uses', 'CapLacks')@ is not representable, by
+              -- a 'PermissionAction', which is a shame).
             in change `seq` (finalActions, Any change)
 
 -- Given the initial and final call sites and a permission P, determine the action
