@@ -427,7 +427,19 @@ processCallTree (Choice a b) (initialPre, initialPost) = do
               finalPost = initialPost \/ afterA \/ afterB
             finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
-processCallTree (Call (Just callPermissions)) (initialPre, initialPost) = do
+processCallTree (Call (Just callPermissions)) initialPrePost =
+  pure (processKnownCall callPermissions initialPrePost)
+
+processCallTree (Call Nothing) initialPrePost =
+                -- Assume an unknown call has irrelevant permissions. I just know this
+                -- is going to bite me later.
+                pure initialPrePost
+
+
+-- | Given a known call with the given permission action set, and the initial sites prior to and after the call node,
+-- return the updated call sites prior to and after the call taking into account the given permission actions.
+processKnownCall :: PermissionActionSet -> (Site, Site) -> (Site, Site)
+processKnownCall callPermissions (initialPre, initialPost) =
             -- We propagate permissions forward in the call tree
             -- at each step. This ensures that the /final/ call site (after the
             -- last call) contains relevant permissions from the body of the
@@ -437,30 +449,23 @@ processCallTree (Call (Just callPermissions)) (initialPre, initialPost) = do
 
               -- Update permission presence (has/lacks/conflicts) according to
               -- permission actions (needs/denies/grants/revokes).
-              (finalPre, finalPost)
-                = HashSet.foldl' permissionsPresenceFromCalleeActions (initialPre, fwdPost) callPermissions
-            finalPre `seq` finalPost `seq` return (finalPre, finalPost)
+              finalPre = HashSet.foldl' updatePre initialPre callPermissions
+              finalPost = HashSet.foldl' updatePost fwdPost callPermissions
+            in finalPre `seq` finalPost `seq` (finalPre, finalPost)
 
-processCallTree (Call Nothing) initialPrePost =
-                -- Assume an unknown call has irrelevant permissions. I just know this
-                -- is going to bite me later.
-                pure initialPrePost
+  -- Note how this works with the forward-propagation above: if a call
+  -- site grants or revokes a permission for which information was
+  -- propagated from the previous call site, the old information is
+  -- /replaced/ to indicate the change in permissions; it doesn't
+  -- generate a conflict unless there's actually conflicting info. And
+  -- if some permission is irrelevant to a particular call, it just
+  -- passes on through.
+  where
+    updatePre :: Site -> PermissionAction -> Site
+    updatePre initialPre callPermission = initialPre \/ getJoin (actionPrecondition callPermission)
 
--- Note how this works with the forward-propagation above: if a call
--- site grants or revokes a permission for which information was
--- propagated from the previous call site, the old information is
--- /replaced/ to indicate the change in permissions; it doesn't
--- generate a conflict unless there's actually conflicting info. And
--- if some permission is irrelevant to a particular call, it just
--- passes on through.
-permissionsPresenceFromCalleeActions :: (Site, Site)
-                                     -> PermissionAction
-                                     -> (Site, Site)
-permissionsPresenceFromCalleeActions (initialPre,initialPost) callPermission =
-  let
-    finalPre = initialPre \/ getJoin (actionPrecondition callPermission)
-    finalPost = strongUpdateCap callPermission initialPost
-  in (finalPre, finalPost)
+    updatePost :: Site -> PermissionAction -> Site
+    updatePost = flip strongUpdateCap
 
 strongUpdateCap :: PermissionAction -> PermissionPresenceSet -> PermissionPresenceSet
 strongUpdateCap act =
@@ -468,6 +473,13 @@ strongUpdateCap act =
     pn = permissionActionName act
   in modifyPresence pn update
   where
+    -- FIXME: this _appears_ to depend on the order of PermissionActions
+    -- (because 'dropCapability' will bottom-out a preceeding update to the
+    -- same permission name), but actually since the only actions that have
+    -- non-bottom postconditions are @Grant pn@ and @Revoke pn@ (and a single
+    -- grant/revoke for the same permission are mutually exclusive, the order
+    -- of updates doesn't matter).  It would be better if 'PermissionAction'
+    -- made this mutual-exclusivity explicit.
     update old = dropCapability old \/ actionPostcondition act
      -- uses = (Uses, CapUnknown) so the effect of dropCapability is to leave
      -- Usage unchanged and cut Capability back down to CapUnknown
