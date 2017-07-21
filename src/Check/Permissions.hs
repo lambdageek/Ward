@@ -367,23 +367,23 @@ propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInit
         -- function by traversing its call tree.
         -- We start processing the call tree from the root, filling in the list
         -- of top-level call sites for the function.
-        processCallSequence graphLookup callVertices (sitePre,sitePost)
-
-        initial <- readIORef sitePre
-        final <- readIORef sitePost
-        writePermissionsFromInferred permissionsRef (initial, final)
+        initialPre <- readIORef sitePre
+        initialPost <- readIORef sitePost
+        (finalPre, finalPost) <- processCallSequence graphLookup callVertices (initialPre,initialPost)
+        writeIORef sitePre finalPre
+        writeIORef sitePost finalPost
+        writePermissionsFromInferred permissionsRef (finalPre, finalPost)
 
 
 processCallSequence :: (Graph.Vertex -> (Node, t1, t))
                     -> CallSequence (Maybe Graph.Vertex)
-                    -> (IORef Site, IORef Site)
+                    -> (Site, Site)
                     -> IO (Site, Site)
-processCallSequence graphLookup s (sitePre,sitePost) =
+processCallSequence graphLookup s (initialPre, initialPost) =
   case viewlCallSequence s of
     Just (a,b) -> do
-            siteMid <- newIORef bottom
-            (fwdPre, _fstMid) <- processCallTree graphLookup a (sitePre, siteMid)
-            (fwdMid, finalPost) <- processCallSequence graphLookup b (siteMid, sitePost)
+            (fwdPre, fstMid) <- processCallTree graphLookup a (initialPre, bottom)
+            (fwdMid, finalPost) <- processCallSequence graphLookup b (fstMid, initialPost)
 
             -- Once we've collected permission information for each call site
             -- and propagated it forward, we propagate all new or /newly-conflicting/
@@ -395,9 +395,8 @@ processCallSequence graphLookup s (sitePre,sitePost) =
               update before after = before \/ permissionDiff after before
               finalMid = update fwdMid finalPost
               finalPre = update fwdPre finalMid
-            finalPre `seq` writeIORef sitePre finalPre
-            return (finalPre, finalPost)
-    Nothing -> (,) <$> readIORef sitePre <*> readIORef sitePost
+            finalPre `seq` return (finalPre, finalPost)
+    Nothing -> pure (initialPre, initialPost)
   where
     permissionDiff (PermissionPresenceSet x) (PermissionPresenceSet y) =
       PermissionPresenceSet (HashMap.differenceWith keepConflicting x y)
@@ -409,25 +408,17 @@ processCallSequence graphLookup s (sitePre,sitePost) =
 -- with the new permission presence set.
 processCallTree :: (Graph.Vertex -> (Node, t1, t)) -- graphLookup
                 -> CallTree (Maybe Graph.Vertex)   -- input
-                -> (IORef Site, IORef Site)        -- permissions prior and after this calltree
+                -> (Site, Site)        -- permissions prior and after this calltree
                 -> IO (Site, Site)
-processCallTree graphLookup (Choice a b) (sitePre,sitePost) = do
-            leftPre <- newIORef bottom
-            leftPost <- newIORef bottom
-            rightPre <- newIORef bottom
-            rightPost <- newIORef bottom
-            (beforeA, afterA) <- processCallSequence graphLookup a (leftPre, leftPost)
-            (beforeB, afterB) <- processCallSequence graphLookup b (rightPre, rightPost)
-            initialPre <- readIORef sitePre
-            initialPost <- readIORef sitePost
-            modifyIORef' sitePre (\x -> x \/ beforeA \/ beforeB)
-            modifyIORef' sitePost (\x -> x \/ afterA \/ afterB)
+processCallTree graphLookup (Choice a b) (initialPre, initialPost) = do
+            (beforeA, afterA) <- processCallSequence graphLookup a bottom
+            (beforeB, afterB) <- processCallSequence graphLookup b bottom
             let
               finalPre = initialPre \/ beforeA \/ beforeB
               finalPost = initialPost \/ afterA \/ afterB
             finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
-processCallTree graphLookup (Call (Just call)) (sitePre,sitePost) = do
+processCallTree graphLookup (Call (Just call)) (initialPre, initialPost) = do
             let (Node { nodePermissions = callPermissionsRef }, callName, _) = graphLookup call
             callPermissions <- readIORef callPermissionsRef
 
@@ -435,22 +426,19 @@ processCallTree graphLookup (Call (Just call)) (sitePre,sitePost) = do
             -- at each step. This ensures that the /final/ call site (after the
             -- last call) contains relevant permissions from the body of the
             -- function.
-            do
-              pre <- readIORef sitePre
-              modifyIORef' sitePost (\/ pre)
+            let
+              fwdPost = initialPre \/ initialPost
 
-            -- Update permission presence (has/lacks/conflicts) according to
-            -- permission actions (needs/denies/grants/revokes).
-            --
-            for_ (HashSet.toList callPermissions) $ permissionsPresenceFromCalleeActions (sitePre,sitePost)
-            finalPre <- readIORef sitePre
-            finalPost <- readIORef sitePost
-            return (finalPre, finalPost)
+              -- Update permission presence (has/lacks/conflicts) according to
+              -- permission actions (needs/denies/grants/revokes).
+              (finalPre, finalPost)
+                = HashSet.foldl' permissionsPresenceFromCalleeActions (initialPre, fwdPost) callPermissions
+            finalPre `seq` finalPost `seq` return (finalPre, finalPost)
 
-processCallTree _ (Call Nothing) (sitePre, sitePost) =
+processCallTree _ (Call Nothing) initialPrePost =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
-                (,) <$> readIORef sitePre <*> readIORef sitePost
+                pure initialPrePost
 
 -- Note how this works with the forward-propagation above: if a call
 -- site grants or revokes a permission for which information was
@@ -459,12 +447,14 @@ processCallTree _ (Call Nothing) (sitePre, sitePost) =
 -- generate a conflict unless there's actually conflicting info. And
 -- if some permission is irrelevant to a particular call, it just
 -- passes on through.
-permissionsPresenceFromCalleeActions :: (IORef Site, IORef Site)
+permissionsPresenceFromCalleeActions :: (Site, Site)
                                      -> PermissionAction
-                                     -> IO ()
-permissionsPresenceFromCalleeActions (sitePre,sitePost) callPermission = do
-  modifyIORef' sitePre $ \current -> current \/ getJoin (actionPrecondition callPermission)
-  modifyIORef' sitePost $ strongUpdateCap callPermission
+                                     -> (Site, Site)
+permissionsPresenceFromCalleeActions (initialPre,initialPost) callPermission =
+  let
+    finalPre = initialPre \/ getJoin (actionPrecondition callPermission)
+    finalPost = strongUpdateCap callPermission initialPost
+  in (finalPre, finalPost)
 
 strongUpdateCap :: PermissionAction -> PermissionPresenceSet -> PermissionPresenceSet
 strongUpdateCap act =
