@@ -489,27 +489,33 @@ strongUpdateCap act =
 writePermissionsFromInferred :: IORef PermissionActionSet -> (Site, Site) -> IO Any
 writePermissionsFromInferred permissionRef initialFinal@(initial, final) = do
             initialActions <- readIORef permissionRef
-            let currentSize = HashSet.size initialActions
+            let (finalActions, change) = updatePermissionActions initialActions initialFinal
+            writeIORef permissionRef finalActions
+            -- TODO: Limit the number of iterations to prevent infinite loops.
+            return change
 
-            -- For each "relevant" permission P in first & last call sites:
+-- | Given the previous 'PermissionActionSet' of a call, and newly inferred
+-- permissons at the initial and final site in the function (before the first
+-- call, after the final call), compute the updated permission action set and a flag
+-- indicating if any new permissions were added.
+updatePermissionActions :: PermissionActionSet -> (Site, Site) -> (PermissionActionSet, Any)
+updatePermissionActions initialActions initialFinal@(initial,final) =
             let
+              currentSize = HashSet.size initialActions
+
+              -- For each "relevant" permission P in first & last call sites:
               relevantPermissions = presenceKeys (initial \/ final)
 
-            let
               derivedActions = HashSet.fromList $ mconcat $ map (derivePermissionActions initialFinal) relevantPermissions
               finalActions = derivedActions <> initialActions
 
-            finalActions `seq` writeIORef permissionRef finalActions
-            let
               modifiedSize = HashSet.size finalActions
-              change = (modifiedSize /= currentSize) || (finalActions /= initialActions)
 
-            -- If we added permissions, the inferred set of permissions for this
-            -- SCC may still be growing, so we re-process the SCC until we reach a
-            -- fixed point.
-            --
-            -- TODO: Limit the number of iterations to prevent infinite loops.
-            change `seq` pure (Any change)
+              -- If we added permissions, the inferred set of permissions for this
+              -- SCC may still be growing, so we re-process the SCC until we reach a
+              -- fixed point.
+              change = (modifiedSize /= currentSize) || (finalActions /= initialActions)
+            in change `seq` (finalActions, Any change)
 
 -- Given the initial and final call sites and a permission P, determine the action
 -- of the function with respect to P by considering its presence or absence at function entry and exit.
