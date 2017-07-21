@@ -449,7 +449,7 @@ processKnownCall callPermissions (initialPre, initialPost) =
 
               -- Update permission presence (has/lacks/conflicts) according to
               -- permission actions (needs/denies/grants/revokes).
-              finalPre = HashSet.foldl' updatePre initialPre callPermissions
+              finalPre = initialPre \/ getJoin (foldMap actionPrecondition callPermissions)
               finalPost = HashSet.foldl' updatePost fwdPost callPermissions
             in finalPre `seq` finalPost `seq` (finalPre, finalPost)
 
@@ -461,9 +461,6 @@ processKnownCall callPermissions (initialPre, initialPost) =
   -- if some permission is irrelevant to a particular call, it just
   -- passes on through.
   where
-    updatePre :: Site -> PermissionAction -> Site
-    updatePre initialPre callPermission = initialPre \/ getJoin (actionPrecondition callPermission)
-
     updatePost :: Site -> PermissionAction -> Site
     updatePost = flip strongUpdateCap
 
