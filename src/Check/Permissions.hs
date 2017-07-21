@@ -384,9 +384,10 @@ propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInit
         writePermissionsFromInferred permissionsRef (finalPre, finalPost)
 
 
-processCallSequence :: CallSequence (Maybe PermissionActionSet)
+processCallSequence :: Monad m =>
+                       CallSequence (Maybe PermissionActionSet)
                     -> (Site, Site)
-                    -> IO (Site, Site)
+                    -> m (Site, Site)
 processCallSequence s (initialPre, initialPost) =
   case viewlCallSequence s of
     Just (a,b) -> do
@@ -414,9 +415,10 @@ processCallSequence s (initialPre, initialPost) =
 -- | Given a call tree and the permission presence set at the current site (as
 -- an index into a vector of sites), update the current site and the following one
 -- with the new permission presence set.
-processCallTree :: CallTree (Maybe PermissionActionSet)         -- input
+processCallTree :: Monad m =>
+                   CallTree (Maybe PermissionActionSet)         -- input
                 -> (Site, Site)        -- permissions prior and after this calltree
-                -> IO (Site, Site)
+                -> m (Site, Site)
 processCallTree (Choice a b) (initialPre, initialPost) = do
             (beforeA, afterA) <- processCallSequence a bottom
             (beforeB, afterB) <- processCallSequence b bottom
