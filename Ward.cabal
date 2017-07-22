@@ -50,7 +50,10 @@ test-suite test
                      , Args
                      , Check.Permissions
                      , Config
+                     , Graph
                      , Types
+                     , DumpCallMap
+                     , ParseCallMap
   ghc-options:         -Wall
   build-depends:       base
                      , HUnit
