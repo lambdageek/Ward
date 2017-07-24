@@ -243,6 +243,7 @@ spec = do
 
   describe "with the transfer functions" $ do
     prop "strongUpdateCap is monotonic" strongUpdateCap_monotonic
+    prop "transferNewNonConflicting is monotonic" transferNewNonConflicting_monotonic
 
 defArgs :: Args
 defArgs = Args
