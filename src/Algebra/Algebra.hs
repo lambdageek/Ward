@@ -17,7 +17,9 @@ module Algebra.Algebra (
   , Join(..)
   ) where
 
+import Data.Foldable (Foldable(..))
 import Data.Hashable (Hashable)
+import Data.Monoid (All(..))
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.HashSet as HashSet
 import qualified Data.Set as Set
@@ -55,6 +57,10 @@ instance (PartialOrd a, PartialOrd b, PartialOrd c) => PartialOrd (a,b,c) where
 -- | The subset ordering on sets - individual elements are not compared
 instance Ord a => PartialOrd (Set.Set a) where
   leq = Set.isSubsetOf
+
+instance (Eq k, Hashable k, PartialOrd a) => PartialOrd (HashMap.HashMap k a) where
+  x `leq` y = {- wish: HM.isSubmapOfBy leq -}
+    HashMap.null (HashMap.difference x y) && getAll (fold $ HashMap.intersectionWith (\vx vy -> All (vx `leq` vy)) x y)
 
 -- | The subset ordering on the keys of the map with values ordered pointwise.
 -- @Map.fromList [("a", 1)] `leq` Map.fromList [("a", 2), ("b", 3)]@ but not
