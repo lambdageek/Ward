@@ -6,8 +6,11 @@
 
 module Check.Permissions
   ( Function(..)
+  -- * Analysis entry points
   , process
   , validatePermissions
+  -- * Transfer functions
+  , strongUpdateCap
   ) where
 
 import Algebra.Algebra
