@@ -11,6 +11,7 @@ module Check.Permissions
   , validatePermissions
   -- * Transfer functions
   , strongUpdateCap
+  , transferNewNonConflicting
   ) where
 
 import Algebra.Algebra
@@ -404,11 +405,18 @@ processCallSequence s (initialPre, initialPost) =
             -- a function with any relevant permissions from the body of the
             -- function.
             let
-              update before after = before \/ permissionDiff after before
+              update before after = transferNewNonConflicting after before
               finalMid = update fwdMid finalPost
               finalPre = update fwdPre finalMid
             finalPre `seq` return (finalPre, finalPost)
     Nothing -> pure (initialPre, initialPost)
+
+-- | Given the permissions after a call-site, update the permissions prior to
+-- the call-site by incorporating any new information, or /new/ conflicts from
+-- after the call.
+transferNewNonConflicting :: PermissionPresenceSet -> PermissionPresenceSet -> PermissionPresenceSet
+transferNewNonConflicting after before =
+  before \/ permissionDiff after before
   where
     permissionDiff (PermissionPresenceSet x) (PermissionPresenceSet y) =
       PermissionPresenceSet (HashMap.differenceWith keepConflicting x y)
