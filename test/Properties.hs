@@ -51,6 +51,21 @@ prop_meet_join_distrib = prop_f_g_distrib (/\) (\/)
 strongUpdateCap_monotonic :: PermissionAction -> QC.Property
 strongUpdateCap_monotonic pa = prop_fn_monotonic (strongUpdateCap pa)
   
+transferNewNonConflicting_monotonic :: {-PermissionPresenceSet -> -} QC.Property
+transferNewNonConflicting_monotonic -- x = prop_fn_monotonic (transferNewNonConflicting x)
+  =
+  let
+    f = transferNewNonConflicting
+  in
+    QC.forAll QC.arbitrary $ \before1 ->
+    QC.forAll (genAboveEq before1) $ \after ->
+    QC.forAll (genAboveEq before1) $ \before2 ->
+    let
+      fa = f after before1
+      fb = f after before2
+    in
+      QC.counterexample (">> after is " ++ show after ++ "\n>> before1 is " ++ show before1 ++ "\n>> before2 is " ++ show before2 ++ "\n>> f before1 is " ++ show fa ++ "\n>> f before2 is " ++ show fb ++ "\n") $
+      f after before1 `leq` f after before2
 
 ----------------------------------------------------------------------
 -- Property combinators
