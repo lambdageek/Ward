@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, TypeApplications #-}
 
 module Main
   ( main
@@ -19,6 +19,7 @@ import Language.C.Data.Node (NodeInfo)
 import Language.C.System.GCC (newGCC)
 import Test.HUnit hiding (errors)
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
 import Text.Parsec (ParseError)
 import Types
 import qualified Args
@@ -32,6 +33,8 @@ import qualified Data.Text.Encoding.Error
 import qualified DumpCallMap
 import qualified Graph
 import qualified ParseCallMap
+
+import Properties
 
 {-# ANN module ("HLint: ignore Redundant do" :: String) #-}
 
@@ -227,6 +230,20 @@ spec = do
         , "test/violated-restriction.c"
         ]
 
+  describe "in the PermissionPresenceSet lattice" $ do
+    prop "(\\/) commutes" (prop_join_commutes @PermissionPresenceSet)
+    prop "(\\/) is associative" (prop_join_assoc @PermissionPresenceSet)
+    prop "(\\/) has bottom as identity" (prop_join_bottom @PermissionPresenceSet)
+    prop "(\\/) is monotonic" (prop_join_monotonic @PermissionPresenceSet)
+    prop "(/\\) commutes" (prop_meet_commutes @PermissionPresenceSet)
+    prop "(/\\) is associative" (prop_meet_assoc @PermissionPresenceSet)
+    prop "(/\\) has bottom as annihilator" (prop_meet_annihilate @PermissionPresenceSet)
+    prop "(/\\) distributes over (\\/)" (prop_join_meet_distrib @PermissionPresenceSet)
+    prop "(\\/) distributes over (/\\)" (prop_meet_join_distrib @PermissionPresenceSet)
+
+  describe "with the transfer functions" $ do
+    prop "strongUpdateCap is monotonic" strongUpdateCap_monotonic
+
 defArgs :: Args
 defArgs = Args
   { Args.preprocessorPath = "gcc"
@@ -294,3 +311,4 @@ callMapRoundtripTest args =
     parseResult = ParseCallMap.fromSource (show (Args.translationUnitPaths args)) txt
   in
     parseResult `shouldBe` (Right callMap)
+

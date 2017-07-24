@@ -54,9 +54,12 @@ test-suite test
                      , Types
                      , DumpCallMap
                      , ParseCallMap
+                     , Properties
   ghc-options:         -Wall
   build-depends:       base
                      , HUnit
+                     , QuickCheck
+                     , quickcheck-instances
                      , array
                      , bytestring
                      , containers >= 0.5.8
