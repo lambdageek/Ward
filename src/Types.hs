@@ -259,7 +259,9 @@ newtype PermissionPresenceSet =
   {
     unPermissionPresenceSet :: HashMap PermissionName PermissionPresence
   }
-  deriving (Eq, JoinSemiLattice, BoundedJoinSemiLattice)
+  deriving (Eq, Show, PartialOrd
+           , JoinSemiLattice, BoundedJoinSemiLattice
+           , MeetSemiLattice)
 
 -- | Given a 'PermissionName' look up its presence in the given
 -- 'PermissionPresenceSet' or 'bottom' if its not in the set.
