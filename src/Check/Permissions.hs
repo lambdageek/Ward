@@ -19,10 +19,8 @@ import Data.Function (fix)
 import Data.Graph (Graph, graphFromEdges)
 import Data.IORef
 import Data.List (isSuffixOf, nub, sort)
-import Data.Maybe (fromMaybe)
 import Data.Monoid ((<>), Any(..))
 import Data.These
-import Data.Vector.Mutable (IOVector)
 import Language.C.Data.Ident (Ident)
 import Language.C.Data.Node (NodeInfo, posOfNode)
 import Language.C.Data.Position (posFile)
@@ -33,8 +31,6 @@ import qualified Data.HashSet as HashSet
 import qualified Data.Map as Map
 import qualified Data.Text as Text
 import qualified Data.Tree as Tree
-import qualified Data.Vector as Vector
-import qualified Data.Vector.Mutable as IOVector
 
 -- | A function given as input to the permission checking algorithm.
 data Function = Function
