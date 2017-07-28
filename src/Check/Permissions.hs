@@ -415,13 +415,12 @@ processCallTree :: Monad m =>
                    CallTree (Maybe PermissionActionSet)         -- input
                 -> (Site, Site)        -- permissions prior and after this calltree
                 -> m (Site, Site)
-processCallTree (Choice a b) (initialPre, initialPost) = do
-            (beforeA, afterA) <- processCallSequence a bottom
-            (beforeB, afterB) <- processCallSequence b bottom
+processCallTree (Choice a b) initialPrePost = do
+            finalA <- processCallSequence a initialPrePost
+            finalB <- processCallSequence b initialPrePost
             let
-              finalPre = initialPre \/ beforeA \/ beforeB
-              finalPost = initialPost \/ afterA \/ afterB
-            finalPre `seq` finalPost `seq` return (finalPre, finalPost)
+              finalAns@(finalPre, finalPost) = finalA \/ finalB
+            finalPre `seq` finalPost `seq` return finalAns
 
 processCallTree (Call (Just callPermissions)) initialPrePost =
   pure (processKnownCall callPermissions initialPrePost)
