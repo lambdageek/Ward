@@ -14,8 +14,9 @@ import Algebra.Algebra
 import Config
 import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (for_, toList)
+import Data.Foldable (for_, toList, foldlM)
 import Data.Function (fix)
+import Data.Functor (void)
 import Data.Graph (Graph, graphFromEdges)
 import Data.IORef
 import Data.List (isSuffixOf, nub, sort)
@@ -374,21 +375,21 @@ propagatePermissionsNode graphLookup (sitePre, sitePost, permissionsRef, newInit
         -- of top-level call sites for the function.
         initialPre <- readIORef sitePre
         initialPost <- readIORef sitePost
-        (finalPre, finalPost) <- processCallSequence callPermissions (initialPre,initialPost)
+        ((finalPre, finalPost), _) <- processCallSequence processCall callPermissions (initialPre,initialPost)
         writeIORef sitePre finalPre
         writeIORef sitePost finalPost
         writePermissionsFromInferred permissionsRef (finalPre, finalPost)
 
-
 processCallSequence :: Monad m =>
-                       CallSequence (Maybe PermissionActionSet)
+                       (a -> (Site, Site) -> m ((Site, Site), b))
+                    -> CallSequence a
                     -> (Site, Site)
-                    -> m (Site, Site)
-processCallSequence s (initialPre, initialPost) =
+                    -> m ((Site, Site), CallSequence b)
+processCallSequence f s (initialPre, initialPost) =
   case viewlCallSequence s of
     Just (a,b) -> do
-            (fwdPre, fstMid) <- processCallTree a (initialPre, bottom)
-            (fwdMid, finalPost) <- processCallSequence b (fstMid, initialPost)
+            ((fwdPre, fstMid), a') <- processCallTree f a (initialPre, bottom)
+            ((fwdMid, finalPost), b') <- processCallSequence f b (fstMid, initialPost)
 
             -- Once we've collected permission information for each call site
             -- and propagated it forward, we propagate all new or /newly-conflicting/
@@ -400,8 +401,8 @@ processCallSequence s (initialPre, initialPost) =
               update before after = before \/ permissionDiff after before
               finalMid = update fwdMid finalPost
               finalPre = update fwdPre finalMid
-            finalPre `seq` return (finalPre, finalPost)
-    Nothing -> pure (initialPre, initialPost)
+            finalPre `seq` return ((finalPre, finalPost), singletonCallSequence a' <> b')
+    Nothing -> pure ((initialPre, initialPost), mempty)
   where
     permissionDiff (PermissionPresenceSet x) (PermissionPresenceSet y) =
       PermissionPresenceSet (HashMap.differenceWith keepConflicting x y)
@@ -412,24 +413,32 @@ processCallSequence s (initialPre, initialPost) =
 -- an index into a vector of sites), update the current site and the following one
 -- with the new permission presence set.
 processCallTree :: Monad m =>
-                   CallTree (Maybe PermissionActionSet)         -- input
+                   (a -> (Site, Site) -> m ((Site, Site), b))
+                -> CallTree a
                 -> (Site, Site)        -- permissions prior and after this calltree
-                -> m (Site, Site)
-processCallTree (Choice a b) initialPrePost = do
-            finalA <- processCallSequence a initialPrePost
-            finalB <- processCallSequence b initialPrePost
+                -> m ((Site, Site), CallTree b)
+processCallTree f (Choice a b) initialPrePost = do
+            (finalA, a') <- processCallSequence f a initialPrePost
+            (finalB, b') <- processCallSequence f b initialPrePost
             let
-              finalAns@(finalPre, finalPost) = finalA \/ finalB
-            finalPre `seq` finalPost `seq` return finalAns
+              ans@(finalPre, finalPost) = finalA \/ finalB
+            finalPre `seq` finalPost `seq` return (ans, Choice a' b')
+processCallTree f (Call a) initialPrePost = do
+  (ans@(finalPre, finalPost), a') <- f a initialPrePost
+  finalPre `seq` finalPost `seq` return (ans, Call a')
 
-processCallTree (Call (Just callPermissions)) initialPrePost =
-  pure (processKnownCall callPermissions initialPrePost)
-
-processCallTree (Call Nothing) initialPrePost =
+processCall :: Monad m =>
+               Maybe PermissionActionSet
+            -> (Site, Site)
+            -> m ((Site, Site), Maybe PermissionActionSet)
+processCall pa@(Just callPermissions) initialPrePost = do
+  let
+    ans@(callPre, callPost) = processKnownCall callPermissions initialPrePost
+  callPre `seq` callPost `seq` return (ans, pa)
+processCall Nothing initialPrePost =
                 -- Assume an unknown call has irrelevant permissions. I just know this
                 -- is going to bite me later.
-                pure initialPrePost
-
+                pure (initialPrePost, Nothing)
 
 -- | Given a known call with the given permission action set, and the initial sites prior to and after the call node,
 -- return the updated call sites prior to and after the call taking into account the given permission actions.
@@ -579,19 +588,18 @@ reportSCC requiredAnnotations restrictions graphLookup scc = do
         annotations = nodeAnnotations node
 
       permissions <- liftIO $ readIORef $ nodePermissions node
-      reportDefinition restrictions requiredPermissions (annotations, permissions, name, pos)
+      reportDefinition requiredPermissions (annotations, permissions, name, pos)
 
       (sitePre, sitePost) <- liftIO ((,) <$> readIORef (nodeSitePre node) <*> readIORef (nodeSitePost node) )
-      reportCallSites restrictions (sitePre, sitePost, nodeCalls node, name, pos)
+      reportCallSites restrictions (sitePre, sitePost, nodeCalls node) (name, pos)
 
 
 -- | Report violations at the function definitino due to missing required annotations,
 -- annotations that miss inferred permissions, or inconsistent inferred permissions.
-reportDefinition :: [Restriction]
-           -> Maybe PermissionActionSet
+reportDefinition :: Maybe PermissionActionSet
            -> (PermissionActionSet, PermissionActionSet, FunctionName, NodeInfo)
            -> Logger ()
-reportDefinition restrictions requiredPermissions (annotations, permissions, name, pos) = do
+reportDefinition requiredPermissions (annotations, permissions, name, pos) = do
       -- If a function has required annotations, ensure the annotation
       -- mentions all inferred permissions.
       for_ requiredPermissions $ \ userAnnotated -> do
@@ -645,11 +653,13 @@ reportDefinition restrictions requiredPermissions (annotations, permissions, nam
 -- | Report violations at the calls in the given function due to
 -- callee functions with conflicting permissions or violated restrictions.
 reportCallSites :: [Restriction]
-                -> (Site, Site, CallSequence FunctionName, FunctionName, NodeInfo)
+                -> (Site, Site, CallSequence FunctionName)
+                -> (FunctionName, NodeInfo)
                 -> Logger ()
-reportCallSites restrictions (sitePre, sitePost, callees, name, pos) = do
+reportCallSites restrictions (sitePre, sitePost, callees) callerInfo = do
       -- Report call sites with conflicting information.
       let conflicts = conflictingPresence sitePre \/ conflictingPresence sitePost
+          (name, pos) = callerInfo
       unless (nullPresence conflicts) $ do
         record True $ Error pos $ Text.concat $
           [ "conflicting information for permissions "
@@ -659,31 +669,42 @@ reportCallSites restrictions (sitePre, sitePost, callees, name, pos) = do
           , "'"
           ]
 
+      let
+        positions :: [Text.Text]
+        positions = callSequencePositions callees
       -- FIXME: need to re-compute the intermediate sites and check their restrictions
 
       -- For each call site, check every restriction and report any violations.
-      for_ (zip [0 :: Int ..] [sitePre,sitePost]) $ \ (index, s) -> do
-        let
-          position = case index of
-            0 -> ["before first call"]
-            _ ->
-              [ "at "
-              , Text.pack $ show $ callTreeIndex (index - 1) callees
-              ]
-        for_ restrictions $ \ restriction -> do
-          unless (evalRestriction s restriction) $ do
-            record True $ Error pos $ Text.concat $
-              [ "restriction "
-              , Text.pack $ show restriction
-              , " violated in '"
-              , name
-              {-
-              , "' with permissions '"
-              , Text.pack $ show $ HashSet.toList s
-              -}
-              , "' "
-              ]
-              <> position
+      void $ foldlM (checkRestrictions callerInfo restrictions) (sitePre, sitePost) positions
+
+checkRestrictions :: (FunctionName, NodeInfo) -> [Restriction] -> (Site, Site) -> Text.Text -> Logger (Site, Site)
+checkRestrictions (name, pos) restrictions (sitePre, sitePost) position = do
+  for_ restrictions $ \ restriction -> do
+    unless (evalRestriction sitePre restriction) $ do
+      record True $ Error pos $ Text.concat $
+        [ "restriction "
+        , Text.pack $ show restriction
+        , " violated in '"
+        , name
+        {-
+        , "' with permissions '"
+        , Text.pack $ show $ HashSet.toList s
+        -}
+        , "' "
+        , position
+        ]
+  return (sitePre, sitePost)
+
+
+callSequencePositions :: Show a => CallSequence a -> [Text.Text]
+callSequencePositions callees = firstPosition : foldMap p callees
+  where
+    firstPosition = "before first call"
+    p :: Show a => a -> [Text.Text]
+    p t = [
+      Text.concat ["at ", Text.pack $ show t]
+      ]
+
 
 
 -- | Builds call graph edges from a list of functions, for input to
