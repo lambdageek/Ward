@@ -71,8 +71,9 @@ joinTranslationUnits [] = error "joinTranslationUnits: empty input"
 -- | Prefixes static function names with the name of the translation unit where
 -- they were defined.
 prefixStatics :: FilePath -> [CExtDecl] -> [CExtDecl]
-prefixStatics path decls = map prefixOne decls
+prefixStatics path decls = traceStatics $ map prefixOne decls
   where
+    traceStatics = trace (unlines ("statics are:" : statics))
     statics =
       [ name
       | CFDefExt (CFunDef specifiers (CDeclr (Just (Ident name _ _)) _ _ _ _) _ _ _) <- decls
