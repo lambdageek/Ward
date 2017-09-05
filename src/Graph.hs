@@ -76,8 +76,8 @@ prefixStatics path decls = traceStatics $ map prefixOne decls
     traceStatics = trace (unlines ("statics are:" : statics))
     statics =
       [ name
-      | CFDefExt (CFunDef specifiers (CDeclr (Just (Ident name _ _)) _ _ _ _) _ _ _) <- decls
-      , CStatic _ : _ <- [[spec | CStorageSpec spec <- specifiers]]
+      | d <- decls
+      , name <- namesOfStaticDeclOrDefn d
       ]
     prefixOne decl = case decl of
       CFDefExt (CFunDef specifiers
@@ -105,6 +105,33 @@ prefixStatics path decls = traceStatics $ map prefixOne decls
         -> CCall (CVar (Ident (patchName name) hash namePos) varPos)
           arguments callPos
       expr -> expr
+
+namesOfStaticDeclOrDefn :: CExtDecl -> [String]
+namesOfStaticDeclOrDefn =
+  \ case
+    CFDefExt (CFunDef specifiers (CDeclr (Just (Ident name _ _)) _ _ _ _) _ _ _)
+      | hasStaticSpecifiers specifiers -> [name]
+    CDeclExt (CDecl specifiers declarators _)
+      | hasStaticSpecifiers specifiers -> concatMap (\(d,_,_) -> namesOfFunDeclarator d) declarators
+    _ -> []
+
+namesOfFunDeclarator :: Maybe (CDeclarator a) -> [String]
+namesOfFunDeclarator (Just (CDeclr (Just (Ident name _ _)) derivedDecls _ _ _)) | any hasFunDeclr derivedDecls = [name]
+namesOfFunDeclarator _ = []
+
+hasFunDeclr :: CDerivedDeclarator a -> Bool
+hasFunDeclr (CFunDeclr {}) = True
+hasFunDeclr _ = False
+
+hasStaticSpecifiers :: [CDeclarationSpecifier a] -> Bool
+hasStaticSpecifiers specifiers =
+  let (storageSpecs, _, _, _, _, _) = partitionDeclSpecs specifiers
+  in any isStaticSpec storageSpecs
+  where
+    isStaticSpec :: CStorageSpecifier a -> Bool
+    isStaticSpec (CStatic {}) = True
+    isStaticSpec _ = False
+
 
 ----
 
